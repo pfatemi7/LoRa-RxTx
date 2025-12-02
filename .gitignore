@@ -1,0 +1,48 @@
+# Arduino/ESP32
+*.hex
+*.elf
+*.bin
+*.eep
+*.a
+*.o
+*.d
+*.lst
+*.sym
+*.su
+*.cpp.dep
+*.ino.dep
+*.elf.dep
+*.map
+*.ino.bak
+*.hex.bak
+
+# Build directories
+build/
+.vscode/
+.idea/
+
+# PlatformIO
+.pio/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE files
+*.sublime-project
+*.sublime-workspace
+.project
+.cproject
+.settings/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
