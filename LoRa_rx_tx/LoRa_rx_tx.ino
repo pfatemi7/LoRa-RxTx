@@ -1,120 +1,170 @@
 #define HELTEC_POWER_BUTTON
 #include <heltec_unofficial.h>
-#include <WiFi.h>
-#include <PubSubClient.h>
-#include "DHT.h"
 
-// WIFI
-const char* ssid = "TELUS1927";
-const char* password = "platform1770";
+#define RADIO_CS_PIN 8
+#define RADIO_RST_PIN 12
+#define RADIO_BUSY_PIN 13
+#define RADIO_DIO1_PIN 14
 
-// MQTT
-const char* mqtt_server = "broker.hivemq.com";
-const int mqtt_port = 1883;
-const char* mqtt_out_topic = "parhamMesh/out";
+#define FREQ 916.0
+#define PERIOD_MS 30000
+#define LISTEN_MS 2000
+#define NORMAL_LISTEN_MS 1800
 
-// CLIENTS
-WiFiClient espClient;
-PubSubClient mqtt(espClient);
+RTC_DATA_ATTR bool paired = false;
+RTC_DATA_ATTR bool isMaster = false;
+RTC_DATA_ATTR uint32_t counter = 0;
+RTC_DATA_ATTR uint8_t missCount = 0;
+RTC_DATA_ATTR uint32_t NODE_ID = 1;
 
-// DHT
-#define DHTPIN 47
-#define DHTTYPE DHT11
-DHT dht(DHTPIN, DHTTYPE);
-
-// LoRa
-#define FREQUENCY        916.0
-#define BANDWIDTH        125.0
-#define SPREADING_FACTOR 11
-#define TXPOWER          22
-
-// NODE ID
-uint32_t NODE_ID = 2;
-
-void sendPacket(const char *payload) {
-  radio.transmit(payload);
-  radio.startReceive();
-  mqtt.publish(mqtt_out_topic, payload);
+void hardResetSX1262() {
+  pinMode(RADIO_RST_PIN, OUTPUT);
+  digitalWrite(RADIO_RST_PIN, LOW);
+  delay(20);
+  digitalWrite(RADIO_RST_PIN, HIGH);
+  delay(20);
 }
 
-void goToSleep() {
-  esp_sleep_enable_timer_wakeup(3600ULL * 1000000ULL); // 1 hour
+void safeSleep() {
+  digitalWrite(Vext, HIGH);
+  esp_sleep_enable_timer_wakeup((uint64_t)PERIOD_MS * 1000ULL);
   esp_deep_sleep_start();
+}
+
+void show(const String &a, const String &b = "") {
+  display.clear();
+  display.drawString(0, 0, a);
+  if (b.length()) display.drawString(0, 20, b);
+  display.display();
+}
+
+void enterDiscovery() {
+  paired = false;
+  missCount = 0;
+
+  show("DISCOVERY", "LISTENING...");
+  radio.startReceive();
+
+  String pkt;
+  uint32_t start = millis();
+
+  while (millis() - start < LISTEN_MS) {
+    if (radio.receive(pkt) == RADIOLIB_ERR_NONE) {
+      pkt.trim();
+      if (pkt.length() == 5) {
+        isMaster = false;
+        paired = true;
+        show("SLAVE MODE", "PAIRED");
+        delay(1500);
+        safeSleep();
+      }
+    }
+    radio.startReceive();
+  }
+
+  // No one spoke → this node becomes master
+  isMaster = true;
+  paired = true;
+  show("MASTER MODE", "ACTIVE");
+  delay(1000);
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(300);
 
-  dht.begin();
-  delay(300);
+  pinMode(Vext, OUTPUT);
+  digitalWrite(Vext, LOW);
+  delay(150);
 
   heltec_setup();
+  display.init();
 
-  // OLED OFF — KILL POWER
-  pinMode(Vext, OUTPUT);
-  digitalWrite(Vext, HIGH);   // OLED fully powered off
+  hardResetSX1262();
 
-  // LoRa init
-  RADIOLIB_OR_HALT(radio.begin());
-  radio.setFrequency(FREQUENCY);
-  radio.setBandwidth(BANDWIDTH);
-  radio.setSpreadingFactor(SPREADING_FACTOR);
-  radio.setOutputPower(TXPOWER);
+  radio.begin();
+  radio.setFrequency(FREQ);
+  radio.setBandwidth(125.0);
+  radio.setSpreadingFactor(11);
   radio.setCodingRate(5);
-  radio.setPreambleLength(12);
   radio.setCRC(true);
-  radio.startReceive();
 
-  // WiFi
-  WiFi.begin(ssid, password);
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) {
-    delay(200);
+  delay(50);
+
+  // ======================================
+  // FIRST BOOT → DISCOVERY MODE
+  // ======================================
+  if (!paired) {
+    enterDiscovery();
   }
 
-  // MQTT
-  mqtt.setServer(mqtt_server, mqtt_port);
-  mqtt.connect(("Node_" + String(NODE_ID)).c_str());
+  // ======================================
+  // MASTER MODE
+  // ======================================
+  if (isMaster) {
+    counter++;
+    if (counter > 9999) counter = 1;
 
-  // ================================
-  // 3 SECOND MESH WINDOW
-  // ================================
+    char payload[10];
+    snprintf(payload, sizeof(payload), "%1u%04u", NODE_ID, counter);
+
+    show("MASTER TX", payload);
+
+    // Triple transmission for reliability
+    for (int i = 0; i < 3; i++) {
+      radio.transmit(payload);
+      delay(120);
+    }
+
+    Serial.println(String("TX: ") + payload);
+
+    delay(1500);
+    safeSleep();
+    return;
+  }
+
+  // ======================================
+  // SLAVE MODE
+  // ======================================
+  show("SLAVE MODE", "LISTENING");
+
+  radio.startReceive();
+  String pkt;
   uint32_t start = millis();
-  while (millis() - start < 3000) {
-    if (radio.available()) {
-      String pkt;
-      radio.readData(pkt);
-      pkt.trim();
+  bool gotData = false;
 
+  while (millis() - start < NORMAL_LISTEN_MS) {
+    if (radio.receive(pkt) == RADIOLIB_ERR_NONE) {
+      pkt.trim();
       if (pkt.length() == 5) {
-        radio.transmit(pkt);
-        radio.startReceive();
-        mqtt.publish(mqtt_out_topic, pkt.c_str());
+        gotData = true;
+        break;
       }
     }
+    radio.startReceive();
   }
 
-  // SENSOR READ
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();
+  if (!gotData) {
+    missCount++;
 
-  int temp = isnan(t) ? 0 : constrain((int)t, 0, 99);
-  int hum  = isnan(h) ? 0 : constrain((int)h, 0, 99);
+    if (missCount >= 1) {
+      show("MASTER LOST", "RE-DISCOVERING");
+      delay(1500);
+      esp_restart();  // clean reset → clean discovery
+    }
 
-  char payload[6];
-  snprintf(payload, 6, "%1d%02d%02d", NODE_ID, temp, hum);
+    // One missed packet → tolerate
+    show("NO DATA", "ONE MISS");
+    delay(1500);
+    safeSleep();
+    return;
+  }
 
-  // SEND SENSOR PACKET
-  sendPacket(payload);
+  // Got valid data
+  missCount = 0;
 
-  // SHUTDOWN WI-FI + LORA
-  WiFi.disconnect(true);
-  radio.sleep();
-
-  // DEEP SLEEP
-  goToSleep();
+  show("SLAVE RX", pkt);
+  delay(1500);
+  safeSleep();
 }
 
 void loop() {}
-

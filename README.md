@@ -1,6 +1,6 @@
-# LoRa Mesh Network with MQTT Integration
+# LoRa Master-Slave Network
 
-A low-power IoT sensor node project using LoRa mesh networking, WiFi, and MQTT for remote environmental monitoring. This project implements a mesh network where nodes can relay messages and transmit temperature/humidity sensor data.
+A low-power LoRa network implementation with automatic master-slave discovery. This project creates a simple star network topology where one node acts as the master (transmitter) and other nodes act as slaves (receivers), with automatic role assignment and master recovery.
 
 ## 📋 Table of Contents
 
@@ -13,7 +13,7 @@ A low-power IoT sensor node project using LoRa mesh networking, WiFi, and MQTT f
 - [How It Works](#how-it-works)
 - [Project Structure](#project-structure)
 - [Usage](#usage)
-- [MQTT Topics](#mqtt-topics)
+- [Network Protocol](#network-protocol)
 - [LoRa Parameters](#lora-parameters)
 - [Power Management](#power-management)
 - [Troubleshooting](#troubleshooting)
@@ -21,32 +21,37 @@ A low-power IoT sensor node project using LoRa mesh networking, WiFi, and MQTT f
 
 ## 🎯 Overview
 
-This project creates a mesh network of LoRa-enabled sensor nodes that:
-- Read temperature and humidity data from DHT11 sensors
-- Relay messages between nodes in a mesh network
-- Transmit sensor data via LoRa and MQTT
-- Operate in deep sleep mode to minimize power consumption (wakes every hour)
+This project implements a LoRa-based master-slave network where:
+- **Master Node**: Transmits periodic counter packets to synchronize the network
+- **Slave Nodes**: Listen for master packets and display received data
+- **Auto-Discovery**: Nodes automatically determine their role on first boot
+- **Master Recovery**: Slaves automatically re-enter discovery mode if master is lost
+- **Low Power**: Deep sleep operation with configurable wake intervals
 
 ## ✨ Features
 
-- **LoRa Mesh Networking**: Nodes can receive and relay packets from other nodes
-- **Dual Communication**: Data sent via both LoRa radio and MQTT
-- **Low Power Operation**: Deep sleep mode with 1-hour wake intervals
-- **Sensor Integration**: DHT11 temperature and humidity sensor
-- **OLED Power Management**: OLED display is powered off to save energy
-- **Automatic Mesh Relay**: 3-second window for receiving and relaying mesh packets
+- **Automatic Master-Slave Discovery**: Nodes automatically determine their role
+- **Master Node**: Transmits counter packets with triple redundancy for reliability
+- **Slave Nodes**: Listen and display received master packets
+- **Master Recovery**: Automatic re-discovery if master connection is lost
+- **OLED Display**: Real-time status and data display
+- **Low Power Operation**: Deep sleep mode with 30-second wake intervals (configurable)
+- **RTC Memory**: State persistence across deep sleep cycles
+- **Hardware Reset**: Automatic SX1262 radio module reset on boot
 
 ## 🔧 Hardware Requirements
 
 - **Heltec ESP32 LoRa V3** (or compatible ESP32 with LoRa module)
-- **DHT11** temperature and humidity sensor
 - **Power Supply**: Battery or USB power (for long-term deployment, use battery)
 
 ### Pin Connections
 
-- **DHT11 Data Pin**: GPIO 47
 - **LoRa Module**: Integrated on Heltec board
-- **OLED Display**: Integrated (powered off in this project)
+  - CS Pin: GPIO 8
+  - RST Pin: GPIO 12
+  - BUSY Pin: GPIO 13
+  - DIO1 Pin: GPIO 14
+- **OLED Display**: Integrated (used for status display)
 
 ## 💻 Software Requirements
 
@@ -54,9 +59,6 @@ This project creates a mesh network of LoRa-enabled sensor nodes that:
 - **ESP32 Board Support** for Arduino IDE
 - **Required Libraries**:
   - `heltec_unofficial.h` - Heltec ESP32 LoRa board support
-  - `WiFi.h` - ESP32 WiFi library (built-in)
-  - `PubSubClient.h` - MQTT client library
-  - `DHT.h` - DHT sensor library
   - RadioLib (included with heltec_unofficial)
 
 ## 📦 Installation
@@ -77,8 +79,6 @@ This project creates a mesh network of LoRa-enabled sensor nodes that:
 
 Install the following libraries via Arduino Library Manager (**Sketch → Include Library → Manage Libraries**):
 
-- **PubSubClient** by Nick O'Leary
-- **DHT sensor library** by Adafruit
 - **heltec_unofficial** (search for Heltec ESP32 or install from GitHub)
 
 ### 3. Clone/Download This Repository
@@ -98,64 +98,90 @@ cd LoRa-RxTx
 
 Before uploading, configure the following in `LoRa_rx_tx.ino`:
 
-### WiFi Credentials
-```cpp
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-```
-
-### MQTT Settings
-```cpp
-const char* mqtt_server = "broker.hivemq.com";  // Or your MQTT broker
-const int mqtt_port = 1883;
-const char* mqtt_out_topic = "parhamMesh/out";
-```
-
 ### Node ID
 ```cpp
-uint32_t NODE_ID = 2;  // Unique ID for each node (0-9)
+RTC_DATA_ATTR uint32_t NODE_ID = 1;  // Unique ID for each node (0-9)
 ```
 
-### LoRa Parameters (if needed)
+### Timing Parameters
 ```cpp
-#define FREQUENCY        916.0    // MHz (adjust for your region)
-#define BANDWIDTH        125.0    // kHz
-#define SPREADING_FACTOR 11       // 6-12
-#define TXPOWER          22       // dBm
+#define PERIOD_MS 30000        // Wake interval in milliseconds (30 seconds)
+#define LISTEN_MS 2000         // Discovery listen window (2 seconds)
+#define NORMAL_LISTEN_MS 1800  // Normal slave listen window (1.8 seconds)
 ```
 
-### Deep Sleep Duration
+### LoRa Parameters
 ```cpp
-esp_sleep_enable_timer_wakeup(3600ULL * 1000000ULL); // 1 hour in microseconds
+#define FREQ 916.0  // Frequency in MHz (adjust for your region)
 ```
+
+The following LoRa parameters are hardcoded:
+- **Bandwidth**: 125.0 kHz
+- **Spreading Factor**: 11
+- **Coding Rate**: 5
+- **CRC**: Enabled
 
 ## 🔄 How It Works
 
-1. **Initialization**: 
-   - Board wakes from deep sleep
-   - Initializes DHT11 sensor
-   - Powers off OLED display
-   - Configures LoRa radio parameters
-   - Connects to WiFi and MQTT broker
+### Initial Boot (Discovery Mode)
 
-2. **Mesh Window (3 seconds)**:
-   - Listens for incoming LoRa packets
-   - Relays valid 5-character packets to other nodes
-   - Publishes received packets to MQTT
+1. **First Boot**: When a node boots for the first time (`paired == false`):
+   - Enters discovery mode
+   - Powers on OLED display
+   - Shows "DISCOVERY LISTENING..."
+   - Listens for 2 seconds for incoming LoRa packets
+   - If a valid 5-character packet is received:
+     - Node becomes **SLAVE**
+     - Shows "SLAVE MODE PAIRED"
+     - Saves state to RTC memory
+     - Enters deep sleep
+   - If no packet is received:
+     - Node becomes **MASTER**
+     - Shows "MASTER MODE ACTIVE"
+     - Saves state to RTC memory
 
-3. **Sensor Reading**:
-   - Reads temperature and humidity from DHT11
-   - Formats data as: `NODE_ID + Temperature (2 digits) + Humidity (2 digits)`
-   - Example: Node 2, 25°C, 60% → `"22560"`
+### Master Node Operation
 
-4. **Data Transmission**:
-   - Sends sensor data via LoRa radio
-   - Publishes same data to MQTT topic
+1. **Wake from Sleep**:
+   - Increments counter (wraps at 9999)
+   - Formats packet: `NODE_ID (1 digit) + Counter (4 digits)`
+   - Example: Node 1, counter 42 → `"10042"`
 
-5. **Power Down**:
-   - Disconnects WiFi
-   - Puts LoRa radio to sleep
-   - Enters deep sleep for 1 hour
+2. **Transmission**:
+   - Displays "MASTER TX" and packet on OLED
+   - Transmits packet **three times** with 120ms delay between transmissions
+   - Logs transmission to Serial Monitor
+   - Enters deep sleep for 30 seconds
+
+### Slave Node Operation
+
+1. **Wake from Sleep**:
+   - Shows "SLAVE MODE LISTENING" on OLED
+   - Starts listening for master packets
+
+2. **Reception**:
+   - Listens for 1.8 seconds
+   - If valid 5-character packet received:
+     - Resets miss counter
+     - Displays "SLAVE RX" and packet on OLED
+     - Enters deep sleep
+   - If no packet received:
+     - Increments miss counter
+     - If miss count >= 1:
+       - Shows "MASTER LOST RE-DISCOVERING"
+       - Performs ESP restart to re-enter discovery mode
+     - If miss count < 1:
+       - Shows "NO DATA ONE MISS" (tolerates one missed packet)
+       - Enters deep sleep
+
+### State Persistence
+
+All state variables use `RTC_DATA_ATTR` to persist across deep sleep:
+- `paired`: Whether node has completed discovery
+- `isMaster`: Current role (master or slave)
+- `counter`: Master's transmission counter
+- `missCount`: Slave's missed packet counter
+- `NODE_ID`: Unique node identifier
 
 ## 📁 Project Structure
 
@@ -169,32 +195,49 @@ LoRa-RxTx/
 
 ## 🚀 Usage
 
-1. **Configure** WiFi, MQTT, and Node ID in the code
+1. **Configure** Node ID and timing parameters in the code
 2. **Upload** the sketch to your Heltec ESP32 LoRa board
-3. **Monitor** via Serial Monitor (115200 baud) for debugging
-4. **Subscribe** to MQTT topic `parhamMesh/out` to receive sensor data
-5. **Deploy** multiple nodes with different NODE_IDs to create a mesh network
+3. **Power on** the first node (it will become master)
+4. **Power on** additional nodes (they will become slaves)
+5. **Monitor** via Serial Monitor (115200 baud) and OLED display
 
 ### Serial Monitor Output
 
-The device will output initialization messages and sensor readings via Serial Monitor at 115200 baud.
-
-### MQTT Monitoring
-
-Subscribe to the MQTT topic to monitor all sensor data:
-
-```bash
-# Using mosquitto_sub
-mosquitto_sub -h broker.hivemq.com -t "parhamMesh/out"
-
-# Or use any MQTT client
+The master node will output transmission logs:
+```
+TX: 10042
+TX: 10043
+...
 ```
 
-## 📡 MQTT Topics
+### OLED Display States
 
-- **Output Topic**: `parhamMesh/out`
-  - Format: `NODE_ID + Temperature + Humidity` (e.g., `"22560"`)
-  - Contains both relayed mesh packets and local sensor readings
+- **Discovery**: "DISCOVERY LISTENING..."
+- **Master**: "MASTER MODE ACTIVE" / "MASTER TX [packet]"
+- **Slave Paired**: "SLAVE MODE PAIRED"
+- **Slave Listening**: "SLAVE MODE LISTENING"
+- **Slave Received**: "SLAVE RX [packet]"
+- **Master Lost**: "MASTER LOST RE-DISCOVERING"
+- **No Data**: "NO DATA ONE MISS"
+
+## 📡 Network Protocol
+
+### Packet Format
+
+- **Length**: 5 characters
+- **Format**: `NODE_ID (1 digit) + Counter (4 digits)`
+- **Example**: `"10042"` = Node 1, Counter 42
+
+### Master Transmission
+
+- Master transmits each packet **three times** with 120ms delay
+- Provides redundancy for better reliability in noisy environments
+
+### Network Topology
+
+- **Star Topology**: One master, multiple slaves
+- **Range**: Typically 1-5 km line-of-sight (depends on environment)
+- **Scalability**: Multiple slaves can listen to one master
 
 ## 📶 LoRa Parameters
 
@@ -202,48 +245,82 @@ mosquitto_sub -h broker.hivemq.com -t "parhamMesh/out"
 - **Bandwidth**: 125 kHz
 - **Spreading Factor**: 11
 - **Coding Rate**: 5
-- **Preamble Length**: 12
-- **TX Power**: 22 dBm
 - **CRC**: Enabled
 
-**Note**: Ensure LoRa parameters match across all nodes in your mesh network.
+**Note**: Ensure LoRa parameters match across all nodes in your network.
 
 ## 🔋 Power Management
 
-- **Deep Sleep**: Device sleeps for 1 hour between readings
-- **OLED Off**: Display is powered off to save energy
-- **WiFi Disconnect**: WiFi is disconnected before sleep
-- **LoRa Sleep**: Radio module enters sleep mode
+- **Deep Sleep**: Device sleeps for 30 seconds between operations (configurable)
+- **OLED Display**: Powered on during operation, off during sleep
+- **Radio Sleep**: Radio module enters sleep mode between operations
+- **RTC Memory**: State preserved during deep sleep
 
-**Estimated Battery Life**: With a 2000mAh battery and 1-hour wake intervals, the device can run for several months.
+**Estimated Battery Life**: With a 2000mAh battery and 30-second wake intervals, the device can run for several weeks to months depending on transmission frequency.
 
 ## 🐛 Troubleshooting
 
-### Device Not Connecting to WiFi
-- Check SSID and password
-- Ensure WiFi is 2.4 GHz (ESP32 doesn't support 5 GHz)
-- Increase timeout in code if needed
+### Node Stuck in Discovery Mode
+- Ensure at least one node is powered on and functioning
+- Check that LoRa parameters match across all nodes
+- Verify antenna connections
+- Check Serial Monitor for error messages
 
-### MQTT Connection Failed
-- Verify MQTT broker is accessible
-- Check firewall settings
-- Try a different MQTT broker (e.g., `test.mosquitto.org`)
-
-### No LoRa Reception
-- Verify all nodes use the same LoRa parameters
-- Check antenna connections
+### Slave Not Receiving Packets
+- Verify master is transmitting (check Serial Monitor)
 - Ensure nodes are within range (typically 1-5 km line-of-sight)
-- Verify frequency is legal in your region
+- Check that LoRa frequency is legal in your region
+- Verify antenna connections on both nodes
+- Check for interference on the selected frequency
 
-### Sensor Reading Errors
-- Check DHT11 wiring (power, ground, data pin 47)
-- Ensure DHT11 has proper pull-up resistor
-- Verify sensor is not damaged
+### Master Not Transmitting
+- Check Serial Monitor for transmission logs
+- Verify OLED display shows "MASTER TX" messages
+- Check radio initialization (hardware reset should occur on boot)
+- Verify power supply is stable
+
+### Frequent Master Loss (Slaves Re-discovering)
+- Master may be out of range or powered off
+- Check master node power supply
+- Verify master is actually transmitting (Serial Monitor)
+- Check for interference or obstacles between nodes
+- Consider increasing `NORMAL_LISTEN_MS` for better reception
+
+### OLED Display Not Working
+- Verify `Vext` pin is set to LOW (powers on display)
+- Check display initialization in `heltec_setup()`
+- Verify display library is properly installed
 
 ### Deep Sleep Issues
 - Ensure GPIO 0 is not pulled low (prevents wake)
 - Check that RTC pins are not disturbed during sleep
 - Verify power supply is stable
+- Check that wake timer is properly configured
+
+## 🔧 Advanced Configuration
+
+### Changing Wake Interval
+
+Modify `PERIOD_MS` to change how often nodes wake:
+```cpp
+#define PERIOD_MS 60000  // Wake every 60 seconds
+```
+
+### Adjusting Listen Windows
+
+Modify discovery and normal listen windows:
+```cpp
+#define LISTEN_MS 3000         // Longer discovery window
+#define NORMAL_LISTEN_MS 2500  // Longer slave listen window
+```
+
+### Changing Frequency
+
+Modify `FREQ` for your region:
+```cpp
+#define FREQ 868.0  // European ISM band
+#define FREQ 915.0  // North American ISM band
+```
 
 ## 📝 License
 
@@ -259,5 +336,4 @@ For questions or issues, please open an issue on GitHub.
 
 ---
 
-**Note**: Remember to change WiFi credentials and MQTT settings before deploying. For production use, consider using environment variables or a configuration file instead of hardcoding credentials.
-
+**Note**: Ensure all nodes use the same LoRa parameters (frequency, bandwidth, spreading factor, etc.) for proper communication. The frequency must be legal for use in your region.
