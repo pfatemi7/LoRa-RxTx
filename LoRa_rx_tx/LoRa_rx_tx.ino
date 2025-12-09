@@ -52,8 +52,18 @@ void enterDiscovery() {
     if (radio.receive(pkt) == RADIOLIB_ERR_NONE) {
       pkt.trim();
       if (pkt.length() == 5) {
-        isMaster = false;
+        uint8_t peerId = pkt.charAt(0) - '0';
         paired = true;
+
+        // Priority: lower numeric ID has precedence (ID1 preferred; ID2 takes over if ID1 is gone)
+        if (peerId > 0 && peerId > NODE_ID) {
+          isMaster = true;
+          show("MASTER MODE", "PRIORITY");
+          delay(1000);
+          return;
+        }
+
+        isMaster = false;
         show("SLAVE MODE", "PAIRED");
         delay(1500);
         safeSleep();
