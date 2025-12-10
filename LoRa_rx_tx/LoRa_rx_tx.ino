@@ -1,170 +1,156 @@
 #define HELTEC_POWER_BUTTON
 #include <heltec_unofficial.h>
 
-#define RADIO_CS_PIN 8
-#define RADIO_RST_PIN 12
-#define RADIO_BUSY_PIN 13
-#define RADIO_DIO1_PIN 14
+// ===============================
+// CONFIG
+// ===============================
+#define NODE_ID 1      // 1 = master, others = slaves
+#define FREQUENCY 916.0
+#define BANDWIDTH 125.0
+#define SPREADING_FACTOR 9
+#define TXPOWER 14
 
-#define FREQ 916.0
-#define PERIOD_MS 30000
-#define LISTEN_MS 2000
-#define NORMAL_LISTEN_MS 1800
+#define HEARTBEAT_GAP 200       // ms between master bursts
+#define HEARTBEAT_COUNT 3       // number of burstse
+#define LISTEN_WINDOW 4500      // slave listening window
+#define FAIL_LIMIT 5            // missed cycles before promotion
+#define SLEEP_MS 5000           // sleep durations
 
-RTC_DATA_ATTR bool paired = false;
+// ===============================
+// STATE
+// ===============================
+volatile bool rxFlag = false;
+String rxdata;
+
 RTC_DATA_ATTR bool isMaster = false;
-RTC_DATA_ATTR uint32_t counter = 0;
+RTC_DATA_ATTR uint32_t counter = 1;
 RTC_DATA_ATTR uint8_t missCount = 0;
-RTC_DATA_ATTR uint32_t NODE_ID = 1;
 
-void hardResetSX1262() {
-  pinMode(RADIO_RST_PIN, OUTPUT);
-  digitalWrite(RADIO_RST_PIN, LOW);
-  delay(20);
-  digitalWrite(RADIO_RST_PIN, HIGH);
-  delay(20);
+// ===============================
+// RX INTERRUPT
+// ===============================
+void rxCallback() {
+  rxFlag = true;
 }
 
-void safeSleep() {
-  digitalWrite(Vext, HIGH);
-  esp_sleep_enable_timer_wakeup((uint64_t)PERIOD_MS * 1000ULL);
-  esp_deep_sleep_start();
-}
-
+// ===============================
+// OLED OUTPUT
+// ===============================
 void show(const String &a, const String &b = "") {
   display.clear();
+  display.setFont(ArialMT_Plain_10);
+  display.setTextAlignment(TEXT_ALIGN_LEFT);
   display.drawString(0, 0, a);
-  if (b.length()) display.drawString(0, 20, b);
+  display.drawString(0, 16, b);
   display.display();
 }
 
-void enterDiscovery() {
-  paired = false;
-  missCount = 0;
-
-  show("DISCOVERY", "LISTENING...");
-  radio.startReceive();
-
-  String pkt;
-  uint32_t start = millis();
-
-  while (millis() - start < LISTEN_MS) {
-    if (radio.receive(pkt) == RADIOLIB_ERR_NONE) {
-      pkt.trim();
-      if (pkt.length() == 5) {
-        isMaster = false;
-        paired = true;
-        show("SLAVE MODE", "PAIRED");
-        delay(1500);
-        safeSleep();
-      }
-    }
-    radio.startReceive();
-  }
-
-  // No one spoke → this node becomes master
-  isMaster = true;
-  paired = true;
-  show("MASTER MODE", "ACTIVE");
-  delay(1000);
+// ===============================
+// RADIO SEND WRAPPER
+// ===============================
+void sendPacket(const String &msg) {
+  radio.transmit(msg.c_str());
+  radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF);
 }
 
-void setup() {
-  Serial.begin(115200);
+// ===============================
+// MASTER LOGIC
+// ===============================
+void runMaster() {
+  String payload = "MASTER|" + String(counter++);
 
-  pinMode(Vext, OUTPUT);
-  digitalWrite(Vext, LOW);
-  delay(150);
-
-  heltec_setup();
-  display.init();
-
-  hardResetSX1262();
-
-  radio.begin();
-  radio.setFrequency(FREQ);
-  radio.setBandwidth(125.0);
-  radio.setSpreadingFactor(11);
-  radio.setCodingRate(5);
-  radio.setCRC(true);
-
-  delay(50);
-
-  // ======================================
-  // FIRST BOOT → DISCOVERY MODE
-  // ======================================
-  if (!paired) {
-    enterDiscovery();
+  for (int i = 0; i < HEARTBEAT_COUNT; i++) {
+    show("MASTER", payload);
+    sendPacket(payload);
+    delay(HEARTBEAT_GAP);
   }
+}
 
-  // ======================================
-  // MASTER MODE
-  // ======================================
-  if (isMaster) {
-    counter++;
-    if (counter > 9999) counter = 1;
+// ===============================
+// SLAVE LOGIC
+// ===============================
+void runSlave() {
+  show("SLAVE", "Listening...");
 
-    char payload[10];
-    snprintf(payload, sizeof(payload), "%1u%04u", NODE_ID, counter);
+  unsigned long start = millis();
+  bool gotMaster = false;
 
-    show("MASTER TX", payload);
+  while (millis() - start < LISTEN_WINDOW) {
 
-    // Triple transmission for reliability
-    for (int i = 0; i < 3; i++) {
-      radio.transmit(payload);
-      delay(120);
-    }
+    if (rxFlag) {
+      rxFlag = false;
+      radio.readData(rxdata);
 
-    Serial.println(String("TX: ") + payload);
+      if (rxdata.startsWith("MASTER|")) {
+        show("RX MASTER", rxdata);
 
-    delay(1500);
-    safeSleep();
-    return;
-  }
-
-  // ======================================
-  // SLAVE MODE
-  // ======================================
-  show("SLAVE MODE", "LISTENING");
-
-  radio.startReceive();
-  String pkt;
-  uint32_t start = millis();
-  bool gotData = false;
-
-  while (millis() - start < NORMAL_LISTEN_MS) {
-    if (radio.receive(pkt) == RADIOLIB_ERR_NONE) {
-      pkt.trim();
-      if (pkt.length() == 5) {
-        gotData = true;
+        missCount = 0;    // reset miss tracker
+        gotMaster = true;
         break;
       }
+
+      radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF);
     }
-    radio.startReceive();
   }
 
-  if (!gotData) {
+  if (!gotMaster) {
     missCount++;
-
-    if (missCount >= 1) {
-      show("MASTER LOST", "RE-DISCOVERING");
-      delay(1500);
-      esp_restart();  // clean reset → clean discovery
-    }
-
-    // One missed packet → tolerate
-    show("NO DATA", "ONE MISS");
-    delay(1500);
-    safeSleep();
-    return;
+    show("NO MASTER", "Misses: " + String(missCount));
   }
 
-  // Got valid data
-  missCount = 0;
-
-  show("SLAVE RX", pkt);
-  delay(1500);
-  safeSleep();
+  if (missCount >= FAIL_LIMIT) {
+    show("PROMOTING", "BECOME MASTER");
+    isMaster = true;
+    missCount = 0;
+  }
 }
 
-void loop() {}
+// ===============================
+// SLEEP
+// ===============================
+void sleepNow() {
+  digitalWrite(Vext, HIGH); // turn off OLED
+  display.clear();
+  display.display();
+
+  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MS * 1000ULL);
+  esp_deep_sleep_start();
+}
+
+// ===============================
+// SETUP
+// ===============================
+void setup() {
+  heltec_setup();
+  Serial.begin(115200);
+
+  // OLED ON
+  pinMode(Vext, OUTPUT);
+  digitalWrite(Vext, LOW);
+  display.init();
+
+  // RADIO INIT
+  RADIOLIB_OR_HALT(radio.begin());
+  radio.setDio1Action(rxCallback);
+  radio.setFrequency(FREQUENCY);
+  radio.setBandwidth(BANDWIDTH);
+  radio.setSpreadingFactor(SPREADING_FACTOR);
+  radio.setOutputPower(TXPOWER);
+  radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF);
+
+  if (NODE_ID == 1)
+    isMaster = true;
+
+  show("BOOT", isMaster ? "MASTER" : "SLAVE");
+  delay(500);
+}
+
+// ===============================
+// LOOP
+// ===============================
+void loop() {
+  if (isMaster) runMaster();
+  else runSlave();
+
+  sleepNow();
+}

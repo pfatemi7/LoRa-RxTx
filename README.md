@@ -1,6 +1,6 @@
 # LoRa Master-Slave Network
 
-A low-power LoRa network implementation with automatic master-slave discovery. This project creates a simple star network topology where one node acts as the master (transmitter) and other nodes act as slaves (receivers), with automatic role assignment and master recovery.
+A simple, low-power LoRa network implementation with automatic master-slave configuration and failover. This project creates a star network topology where Node ID 1 acts as the master by default, with automatic promotion of other nodes if the master fails.
 
 ## 📋 Table of Contents
 
@@ -21,23 +21,22 @@ A low-power LoRa network implementation with automatic master-slave discovery. T
 
 ## 🎯 Overview
 
-This project implements a LoRa-based master-slave network where:
-- **Master Node**: Transmits periodic counter packets to synchronize the network
-- **Slave Nodes**: Listen for master packets and display received data
-- **Auto-Discovery**: Nodes automatically determine their role on first boot
-- **Master Recovery**: Slaves automatically re-enter discovery mode if master is lost
+This project implements a simple LoRa-based master-slave network where:
+- **Master Node (ID 1)**: Transmits periodic heartbeat packets with counter
+- **Slave Nodes (ID 2+)**: Listen for master packets and track missed cycles
+- **Automatic Failover**: Slaves automatically promote to master if master fails (5 missed cycles)
 - **Low Power**: Deep sleep operation with configurable wake intervals
+- **Interrupt-Based RX**: Uses hardware interrupts for efficient packet reception
 
 ## ✨ Features
 
-- **Automatic Master-Slave Discovery**: Nodes automatically determine their role
-- **Master Node**: Transmits counter packets with triple redundancy for reliability
-- **Slave Nodes**: Listen and display received master packets
-- **Master Recovery**: Automatic re-discovery if master connection is lost
+- **Simple Configuration**: Node ID 1 is master by default, others are slaves
+- **Automatic Master Promotion**: Slaves become master after 5 missed cycles
+- **Interrupt-Based Reception**: Hardware interrupt (DIO1) for efficient packet detection
 - **OLED Display**: Real-time status and data display
-- **Low Power Operation**: Deep sleep mode with 30-second wake intervals (configurable)
+- **Low Power Operation**: Deep sleep mode with configurable wake intervals (default 5 seconds)
 - **RTC Memory**: State persistence across deep sleep cycles
-- **Hardware Reset**: Automatic SX1262 radio module reset on boot
+- **Triple Redundancy**: Master transmits heartbeat 3 times for reliability
 
 ## 🔧 Hardware Requirements
 
@@ -47,10 +46,7 @@ This project implements a LoRa-based master-slave network where:
 ### Pin Connections
 
 - **LoRa Module**: Integrated on Heltec board
-  - CS Pin: GPIO 8
-  - RST Pin: GPIO 12
-  - BUSY Pin: GPIO 13
-  - DIO1 Pin: GPIO 14
+  - DIO1 Pin: Used for RX interrupt callback
 - **OLED Display**: Integrated (used for status display)
 
 ## 💻 Software Requirements
@@ -100,88 +96,77 @@ Before uploading, configure the following in `LoRa_rx_tx.ino`:
 
 ### Node ID
 ```cpp
-RTC_DATA_ATTR uint32_t NODE_ID = 1;  // Unique ID for each node (0-9)
-```
-
-### Timing Parameters
-```cpp
-#define PERIOD_MS 30000        // Wake interval in milliseconds (30 seconds)
-#define LISTEN_MS 2000         // Discovery listen window (2 seconds)
-#define NORMAL_LISTEN_MS 1800  // Normal slave listen window (1.8 seconds)
+#define NODE_ID 1      // 1 = master, others = slaves
 ```
 
 ### LoRa Parameters
 ```cpp
-#define FREQ 916.0  // Frequency in MHz (adjust for your region)
+#define FREQUENCY 916.0        // MHz (adjust for your region)
+#define BANDWIDTH 125.0        // kHz
+#define SPREADING_FACTOR 9     // 6-12 (lower = faster, less range)
+#define TXPOWER 14             // dBm (adjust for range/power consumption)
 ```
 
-The following LoRa parameters are hardcoded:
-- **Bandwidth**: 125.0 kHz
-- **Spreading Factor**: 11
-- **Coding Rate**: 5
-- **CRC**: Enabled
+### Timing Parameters
+```cpp
+#define HEARTBEAT_GAP 200      // ms between master heartbeat bursts
+#define HEARTBEAT_COUNT 3      // number of heartbeat bursts
+#define LISTEN_WINDOW 4500     // slave listening window (ms)
+#define FAIL_LIMIT 5           // missed cycles before slave promotes to master
+#define SLEEP_MS 5000          // sleep duration between cycles (ms)
+```
 
 ## 🔄 How It Works
 
-### Initial Boot (Discovery Mode)
+### Initial Boot
 
-1. **First Boot**: When a node boots for the first time (`paired == false`):
-   - Enters discovery mode
-   - Powers on OLED display
-   - Shows "DISCOVERY LISTENING..."
-   - Listens for 2 seconds for incoming LoRa packets
-   - If a valid 5-character packet is received:
-     - Node becomes **SLAVE**
-     - Shows "SLAVE MODE PAIRED"
-     - Saves state to RTC memory
-     - Enters deep sleep
-   - If no packet is received:
-     - Node becomes **MASTER**
-     - Shows "MASTER MODE ACTIVE"
-     - Saves state to RTC memory
+1. **Node ID 1**: Automatically becomes master on boot
+2. **Other Nodes**: Start as slaves and listen for master packets
 
 ### Master Node Operation
 
 1. **Wake from Sleep**:
-   - Increments counter (wraps at 9999)
-   - Formats packet: `NODE_ID (1 digit) + Counter (4 digits)`
-   - Example: Node 1, counter 42 → `"10042"`
+   - Increments counter
+   - Formats packet: `"MASTER|" + counter`
+   - Example: `"MASTER|42"`
 
 2. **Transmission**:
-   - Displays "MASTER TX" and packet on OLED
-   - Transmits packet **three times** with 120ms delay between transmissions
-   - Logs transmission to Serial Monitor
-   - Enters deep sleep for 30 seconds
+   - Displays "MASTER" and payload on OLED
+   - Transmits packet **three times** with 200ms delay between bursts
+   - Enters deep sleep for 5 seconds (configurable)
 
 ### Slave Node Operation
 
 1. **Wake from Sleep**:
-   - Shows "SLAVE MODE LISTENING" on OLED
-   - Starts listening for master packets
+   - Shows "SLAVE Listening..." on OLED
+   - Starts listening for master packets using interrupt-based RX
 
 2. **Reception**:
-   - Listens for 1.8 seconds
-   - If valid 5-character packet received:
+   - Listens for up to 4.5 seconds (LISTEN_WINDOW)
+   - Uses hardware interrupt (DIO1) to detect incoming packets
+   - If packet starts with "MASTER|":
      - Resets miss counter
-     - Displays "SLAVE RX" and packet on OLED
-     - Enters deep sleep
+     - Displays "RX MASTER" and packet on OLED
    - If no packet received:
      - Increments miss counter
-     - If miss count >= 1:
-       - Shows "MASTER LOST RE-DISCOVERING"
-       - Performs ESP restart to re-enter discovery mode
-     - If miss count < 1:
-       - Shows "NO DATA ONE MISS" (tolerates one missed packet)
-       - Enters deep sleep
+     - Displays "NO MASTER" and miss count
+
+3. **Master Promotion**:
+   - If miss count >= 5 (FAIL_LIMIT):
+     - Promotes itself to master
+     - Displays "PROMOTING BECOME MASTER"
+     - Sets `isMaster = true`
+     - Resets miss counter
+
+4. **Sleep**:
+   - Enters deep sleep for 5 seconds (configurable)
 
 ### State Persistence
 
 All state variables use `RTC_DATA_ATTR` to persist across deep sleep:
-- `paired`: Whether node has completed discovery
 - `isMaster`: Current role (master or slave)
 - `counter`: Master's transmission counter
 - `missCount`: Slave's missed packet counter
-- `NODE_ID`: Unique node identifier
 
 ## 📁 Project Structure
 
@@ -195,103 +180,101 @@ LoRa-RxTx/
 
 ## 🚀 Usage
 
-1. **Configure** Node ID and timing parameters in the code
+1. **Configure** Node ID in the code (ID 1 = master, others = slaves)
 2. **Upload** the sketch to your Heltec ESP32 LoRa board
-3. **Power on** the first node (it will become master)
-4. **Power on** additional nodes (they will become slaves)
+3. **Power on** Node ID 1 (it will become master)
+4. **Power on** additional nodes with different IDs (they will become slaves)
 5. **Monitor** via Serial Monitor (115200 baud) and OLED display
 
 ### Serial Monitor Output
 
-The master node will output transmission logs:
-```
-TX: 10042
-TX: 10043
-...
-```
+Serial output is available for debugging (115200 baud).
 
 ### OLED Display States
 
-- **Discovery**: "DISCOVERY LISTENING..."
-- **Master**: "MASTER MODE ACTIVE" / "MASTER TX [packet]"
-- **Slave Paired**: "SLAVE MODE PAIRED"
-- **Slave Listening**: "SLAVE MODE LISTENING"
-- **Slave Received**: "SLAVE RX [packet]"
-- **Master Lost**: "MASTER LOST RE-DISCOVERING"
-- **No Data**: "NO DATA ONE MISS"
+- **Boot**: "BOOT MASTER" or "BOOT SLAVE"
+- **Master**: "MASTER [payload]"
+- **Slave Listening**: "SLAVE Listening..."
+- **Slave Received**: "RX MASTER [payload]"
+- **No Master**: "NO MASTER Misses: [count]"
+- **Promotion**: "PROMOTING BECOME MASTER"
 
 ## 📡 Network Protocol
 
 ### Packet Format
 
-- **Length**: 5 characters
-- **Format**: `NODE_ID (1 digit) + Counter (4 digits)`
-- **Example**: `"10042"` = Node 1, Counter 42
+- **Master Packet**: `"MASTER|" + counter`
+- **Example**: `"MASTER|42"` = Master, Counter 42
 
 ### Master Transmission
 
-- Master transmits each packet **three times** with 120ms delay
+- Master transmits each packet **three times** with 200ms delay between bursts
 - Provides redundancy for better reliability in noisy environments
 
 ### Network Topology
 
 - **Star Topology**: One master, multiple slaves
-- **Range**: Typically 1-5 km line-of-sight (depends on environment)
+- **Range**: Typically 1-5 km line-of-sight (depends on environment and LoRa parameters)
 - **Scalability**: Multiple slaves can listen to one master
+- **Failover**: Automatic master promotion if master fails
 
 ## 📶 LoRa Parameters
 
+Default configuration:
 - **Frequency**: 916.0 MHz (adjust for your region's ISM band)
-- **Bandwidth**: 125 kHz
-- **Spreading Factor**: 11
-- **Coding Rate**: 5
-- **CRC**: Enabled
+- **Bandwidth**: 125.0 kHz
+- **Spreading Factor**: 9 (faster, less range than SF11)
+- **TX Power**: 14 dBm (adjustable for range/power tradeoff)
 
 **Note**: Ensure LoRa parameters match across all nodes in your network.
 
 ## 🔋 Power Management
 
-- **Deep Sleep**: Device sleeps for 30 seconds between operations (configurable)
-- **OLED Display**: Powered on during operation, off during sleep
-- **Radio Sleep**: Radio module enters sleep mode between operations
+- **Deep Sleep**: Device sleeps for 5 seconds between cycles (configurable via `SLEEP_MS`)
+- **OLED Display**: Powered off during sleep (Vext = HIGH)
 - **RTC Memory**: State preserved during deep sleep
+- **Interrupt-Based RX**: More power-efficient than polling
 
-**Estimated Battery Life**: With a 2000mAh battery and 30-second wake intervals, the device can run for several weeks to months depending on transmission frequency.
+**Estimated Battery Life**: With a 2000mAh battery and 5-second wake intervals, the device can run for several weeks to months depending on transmission frequency and power settings.
 
 ## 🐛 Troubleshooting
 
-### Node Stuck in Discovery Mode
-- Ensure at least one node is powered on and functioning
-- Check that LoRa parameters match across all nodes
-- Verify antenna connections
-- Check Serial Monitor for error messages
+### Multiple Masters Appearing
+
+- Ensure only Node ID 1 is configured as master initially
+- Check that `NODE_ID` is correctly set in each node's code
+- Verify that slaves are receiving master packets (check miss count)
 
 ### Slave Not Receiving Packets
-- Verify master is transmitting (check Serial Monitor)
+
+- Verify master is transmitting (check OLED display)
 - Ensure nodes are within range (typically 1-5 km line-of-sight)
-- Check that LoRa frequency is legal in your region
-- Verify antenna connections on both nodes
+- Check that LoRa parameters match across all nodes
+- Verify antenna connections
 - Check for interference on the selected frequency
+- Increase `LISTEN_WINDOW` if needed
+
+### Slave Promoting Too Quickly
+
+- Increase `FAIL_LIMIT` to allow more missed cycles before promotion
+- Check master transmission reliability
+- Verify master is actually transmitting
 
 ### Master Not Transmitting
-- Check Serial Monitor for transmission logs
-- Verify OLED display shows "MASTER TX" messages
-- Check radio initialization (hardware reset should occur on boot)
+
+- Check OLED display for "MASTER" status
+- Verify `NODE_ID == 1` or `isMaster == true`
+- Check radio initialization
 - Verify power supply is stable
 
-### Frequent Master Loss (Slaves Re-discovering)
-- Master may be out of range or powered off
-- Check master node power supply
-- Verify master is actually transmitting (Serial Monitor)
-- Check for interference or obstacles between nodes
-- Consider increasing `NORMAL_LISTEN_MS` for better reception
-
 ### OLED Display Not Working
+
 - Verify `Vext` pin is set to LOW (powers on display)
-- Check display initialization in `heltec_setup()`
+- Check display initialization
 - Verify display library is properly installed
 
 ### Deep Sleep Issues
+
 - Ensure GPIO 0 is not pulled low (prevents wake)
 - Check that RTC pins are not disturbed during sleep
 - Verify power supply is stable
@@ -299,27 +282,41 @@ TX: 10043
 
 ## 🔧 Advanced Configuration
 
-### Changing Wake Interval
+### Changing Sleep Duration
 
-Modify `PERIOD_MS` to change how often nodes wake:
+Modify `SLEEP_MS` to change how often nodes wake:
 ```cpp
-#define PERIOD_MS 60000  // Wake every 60 seconds
+#define SLEEP_MS 10000  // Wake every 10 seconds
 ```
 
-### Adjusting Listen Windows
+### Adjusting Listen Window
 
-Modify discovery and normal listen windows:
+Modify `LISTEN_WINDOW` for better reception:
 ```cpp
-#define LISTEN_MS 3000         // Longer discovery window
-#define NORMAL_LISTEN_MS 2500  // Longer slave listen window
+#define LISTEN_WINDOW 6000  // Listen for 6 seconds
+```
+
+### Changing Failover Threshold
+
+Modify `FAIL_LIMIT` to change when slaves promote:
+```cpp
+#define FAIL_LIMIT 10  // Promote after 10 missed cycles
+```
+
+### Adjusting LoRa Parameters
+
+Modify for your needs:
+```cpp
+#define SPREADING_FACTOR 11  // Higher = more range, slower
+#define TXPOWER 22          // Higher = more range, more power
 ```
 
 ### Changing Frequency
 
-Modify `FREQ` for your region:
+Modify for your region:
 ```cpp
-#define FREQ 868.0  // European ISM band
-#define FREQ 915.0  // North American ISM band
+#define FREQUENCY 868.0  // European ISM band
+#define FREQUENCY 915.0  // North American ISM band
 ```
 
 ## 📝 License
@@ -336,4 +333,4 @@ For questions or issues, please open an issue on GitHub.
 
 ---
 
-**Note**: Ensure all nodes use the same LoRa parameters (frequency, bandwidth, spreading factor, etc.) for proper communication. The frequency must be legal for use in your region.
+**Note**: Ensure all nodes use the same LoRa parameters (frequency, bandwidth, spreading factor, etc.) for proper communication. The frequency must be legal for use in your region. Node ID 1 is the default master; other nodes will automatically promote if the master fails.
