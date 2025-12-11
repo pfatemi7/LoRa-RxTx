@@ -24,14 +24,14 @@ A simple, low-power LoRa network implementation with automatic master-slave conf
 This project implements a simple LoRa-based master-slave network where:
 - **Master Node (ID 1)**: Transmits periodic heartbeat packets with counter
 - **Slave Nodes (ID 2+)**: Listen for master packets and track missed cycles
-- **Automatic Failover**: Slaves automatically promote to master if master fails (5 missed cycles)
+- **Automatic Failover**: Slaves automatically promote to master if master fails (10 missed cycles)
 - **Low Power**: Deep sleep operation with configurable wake intervals
 - **Interrupt-Based RX**: Uses hardware interrupts for efficient packet reception
 
 ## ✨ Features
 
 - **Simple Configuration**: Node ID 1 is master by default, others are slaves
-- **Automatic Master Promotion**: Slaves become master after 5 missed cycles
+- **Automatic Master Promotion**: Slaves become master after 10 missed cycles
 - **Interrupt-Based Reception**: Hardware interrupt (DIO1) for efficient packet detection
 - **OLED Display**: Real-time status and data display
 - **Low Power Operation**: Deep sleep mode with configurable wake intervals (default 5 seconds)
@@ -109,10 +109,10 @@ Before uploading, configure the following in `LoRa_rx_tx.ino`:
 
 ### Timing Parameters
 ```cpp
-#define HEARTBEAT_GAP 200      // ms between master heartbeat bursts
+#define HEARTBEAT_GAP 150      // ms between master heartbeat bursts
 #define HEARTBEAT_COUNT 3      // number of heartbeat bursts
-#define LISTEN_WINDOW 4500     // slave listening window (ms)
-#define FAIL_LIMIT 5           // missed cycles before slave promotes to master
+#define LISTEN_WINDOW 6500     // slave listening window (ms) - slaves wait longer
+#define FAIL_LIMIT 10          // missed cycles before slave promotes to master
 #define SLEEP_MS 5000          // sleep duration between cycles (ms)
 ```
 
@@ -132,7 +132,7 @@ Before uploading, configure the following in `LoRa_rx_tx.ino`:
 
 2. **Transmission**:
    - Displays "MASTER" and payload on OLED
-   - Transmits packet **three times** with 200ms delay between bursts
+   - Transmits packet **three times** with 150ms delay between bursts
    - Enters deep sleep for 5 seconds (configurable)
 
 ### Slave Node Operation
@@ -142,17 +142,17 @@ Before uploading, configure the following in `LoRa_rx_tx.ino`:
    - Starts listening for master packets using interrupt-based RX
 
 2. **Reception**:
-   - Listens for up to 4.5 seconds (LISTEN_WINDOW)
+   - Listens for up to 6.5 seconds (LISTEN_WINDOW) - extended window for better reliability
    - Uses hardware interrupt (DIO1) to detect incoming packets
    - If packet starts with "MASTER|":
      - Resets miss counter
      - Displays "RX MASTER" and packet on OLED
    - If no packet received:
      - Increments miss counter
-     - Displays "NO MASTER" and miss count
+     - Displays "NO MASTER" and miss count (format: "Miss=X")
 
 3. **Master Promotion**:
-   - If miss count >= 5 (FAIL_LIMIT):
+   - If miss count >= 10 (FAIL_LIMIT):
      - Promotes itself to master
      - Displays "PROMOTING BECOME MASTER"
      - Sets `isMaster = true`
@@ -196,7 +196,7 @@ Serial output is available for debugging (115200 baud).
 - **Master**: "MASTER [payload]"
 - **Slave Listening**: "SLAVE Listening..."
 - **Slave Received**: "RX MASTER [payload]"
-- **No Master**: "NO MASTER Misses: [count]"
+- **No Master**: "NO MASTER Miss=[count]"
 - **Promotion**: "PROMOTING BECOME MASTER"
 
 ## 📡 Network Protocol
@@ -208,7 +208,7 @@ Serial output is available for debugging (115200 baud).
 
 ### Master Transmission
 
-- Master transmits each packet **three times** with 200ms delay between bursts
+- Master transmits each packet **three times** with 150ms delay between bursts
 - Provides redundancy for better reliability in noisy environments
 
 ### Network Topology
@@ -231,7 +231,9 @@ Default configuration:
 ## 🔋 Power Management
 
 - **Deep Sleep**: Device sleeps for 5 seconds between cycles (configurable via `SLEEP_MS`)
-- **OLED Display**: Powered off during sleep (Vext = HIGH)
+- **OLED Display**: Powered off during sleep (Vext = HIGH) and during radio initialization
+- **Safe Boot Sequence**: OLED and peripherals kept off during radio initialization to prevent interference
+- **Radio Reset**: Hardware reset performed during initialization for reliable operation
 - **RTC Memory**: State preserved during deep sleep
 - **Interrupt-Based RX**: More power-efficient than polling
 
@@ -291,16 +293,23 @@ Modify `SLEEP_MS` to change how often nodes wake:
 
 ### Adjusting Listen Window
 
-Modify `LISTEN_WINDOW` for better reception:
+Modify `LISTEN_WINDOW` for better reception (default is 6500ms):
 ```cpp
-#define LISTEN_WINDOW 6000  // Listen for 6 seconds
+#define LISTEN_WINDOW 8000  // Listen for 8 seconds
 ```
 
 ### Changing Failover Threshold
 
-Modify `FAIL_LIMIT` to change when slaves promote:
+Modify `FAIL_LIMIT` to change when slaves promote (default is 10):
 ```cpp
-#define FAIL_LIMIT 10  // Promote after 10 missed cycles
+#define FAIL_LIMIT 15  // Promote after 15 missed cycles
+```
+
+### Adjusting Heartbeat Gap
+
+Modify `HEARTBEAT_GAP` to change timing between bursts (default is 150ms):
+```cpp
+#define HEARTBEAT_GAP 200  // 200ms between bursts
 ```
 
 ### Adjusting LoRa Parameters
