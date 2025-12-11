@@ -423,7 +423,9 @@ Modify for your needs (must match across all nodes):
 
 ## 📝 License
 
-This project is open source. Feel free to use, modify, and distribute as needed.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+**Summary**: You are free to use, modify, distribute, and even sell this software, as long as you include the original copyright notice and license text.
 
 ## 🤝 Contributing
 

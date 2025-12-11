@@ -1,3 +1,15 @@
+/*
+ * LoRa TDMA Slave Node
+ * 
+ * Copyright (c) 2024 LoRa RxTx Contributors
+ * 
+ * This software is provided "as is", without warranty of any kind, express or
+ * implied, including but not limited to the warranties of merchantability,
+ * fitness for a particular purpose and noninfringement.
+ * 
+ * See LICENSE file for full license terms.
+ */
+
 // =======================
 // SLAVE (ID > 1) - 1s staggered TX + DEEP SLEEP
 // =======================
