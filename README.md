@@ -1,6 +1,6 @@
-# LoRa Master-Slave Network
+# LoRa TDMA Master-Slave Network with WiFi Upload
 
-A simple, low-power LoRa network implementation with automatic master-slave configuration and failover. This project creates a star network topology where Node ID 1 acts as the master by default, with automatic promotion of other nodes if the master fails.
+A time-division multiple access (TDMA) LoRa network implementation with automatic frame synchronization and WiFi-based data upload. The master node broadcasts frame synchronization messages, and slave nodes transmit in staggered time slots to avoid collisions.
 
 ## 📋 Table of Contents
 
@@ -21,26 +21,28 @@ A simple, low-power LoRa network implementation with automatic master-slave conf
 
 ## 🎯 Overview
 
-This project implements a simple LoRa-based master-slave network where:
-- **Master Node (ID 1)**: Transmits periodic heartbeat packets with counter
-- **Slave Nodes (ID 2+)**: Listen for master packets and track missed cycles
-- **Automatic Failover**: Slaves automatically promote to master if master fails (10 missed cycles)
-- **Low Power**: Deep sleep operation with configurable wake intervals
-- **Interrupt-Based RX**: Uses hardware interrupts for efficient packet reception
+This project implements a TDMA-based LoRa network where:
+- **Master Node (ID 1)**: Broadcasts frame synchronization messages every 10 seconds
+- **Slave Nodes (ID 2+)**: Transmit in staggered time slots after receiving frame sync
+- **TDMA Scheduling**: Each slave transmits at a specific offset to prevent collisions
+- **Data Logging**: Master logs all received data to SPIFFS as NDJSON
+- **WiFi Upload**: Master periodically uploads logged data to a webhook URL via HTTP POST
 
 ## ✨ Features
 
-- **Simple Configuration**: Node ID 1 is master by default, others are slaves
-- **Automatic Master Promotion**: Slaves become master after 10 missed cycles
-- **Interrupt-Based Reception**: Hardware interrupt (DIO1) for efficient packet detection
-- **OLED Display**: Real-time status and data display
-- **Low Power Operation**: Deep sleep mode with configurable wake intervals (default 5 seconds)
-- **RTC Memory**: State persistence across deep sleep cycles
-- **Triple Redundancy**: Master transmits heartbeat 3 times for reliability
+- **TDMA Architecture**: Time-division multiple access prevents packet collisions
+- **Frame Synchronization**: Master broadcasts "FRAME|counter" every 10 seconds
+- **Staggered Transmission**: Slaves transmit 1 second apart (Node 2 at +200ms, Node 3 at +1200ms, etc.)
+- **Deep Sleep**: Slaves sleep for 10 seconds after transmission for power efficiency
+- **Data Logging**: Master logs all received packets to SPIFFS as newline-delimited JSON
+- **WiFi Upload**: Automatic HTTP POST upload to webhook URL every 60 seconds
+- **Persistent Counters**: Slave counters survive deep sleep using RTC memory
+- **Collision Avoidance**: TDMA scheduling ensures no two nodes transmit simultaneously
 
 ## 🔧 Hardware Requirements
 
 - **Heltec ESP32 LoRa V3** (or compatible ESP32 with LoRa module)
+- **WiFi Access**: Master node requires WiFi connectivity for data upload
 - **Power Supply**: Battery or USB power (for long-term deployment, use battery)
 
 ### Pin Connections
@@ -48,6 +50,7 @@ This project implements a simple LoRa-based master-slave network where:
 - **LoRa Module**: Integrated on Heltec board
   - DIO1 Pin: Used for RX interrupt callback
 - **OLED Display**: Integrated (used for status display)
+- **WiFi**: Built-in ESP32 WiFi (master node only)
 
 ## 💻 Software Requirements
 
@@ -55,6 +58,10 @@ This project implements a simple LoRa-based master-slave network where:
 - **ESP32 Board Support** for Arduino IDE
 - **Required Libraries**:
   - `heltec_unofficial.h` - Heltec ESP32 LoRa board support
+  - `WiFi.h` - ESP32 WiFi library (built-in)
+  - `HTTPClient.h` - ESP32 HTTP client library (built-in)
+  - `SPIFFS.h` - ESP32 SPIFFS file system (built-in)
+  - `esp_sleep.h` - ESP32 deep sleep (built-in)
   - RadioLib (included with heltec_unofficial)
 
 ## 📦 Installation
@@ -86,246 +93,332 @@ cd LoRa-RxTx
 
 ### 4. Open the Project
 
-- Open `LoRa_rx_tx/LoRa_rx_tx.ino` in Arduino IDE
+- **For Master Node**: Open `master/master.ino` in Arduino IDE
+- **For Slave Nodes**: Open `slave/slave.ino` in Arduino IDE
 - Select your board: **Tools → Board → ESP32 Arduino → Heltec ESP32 LoRa V3**
 - Select the correct port: **Tools → Port**
 
 ## ⚙️ Configuration
 
-Before uploading, configure the following in `LoRa_rx_tx.ino`:
+### Master Node Configuration (`master/master.ino`)
 
-### Node ID
+#### WiFi Settings
 ```cpp
-#define NODE_ID 1      // 1 = master, others = slaves
+const char* WIFI_SSID     = "YourWiFiSSID";
+const char* WIFI_PASSWORD = "YourWiFiPassword";
 ```
 
-### LoRa Parameters
+#### Server Configuration
 ```cpp
-#define FREQUENCY 916.0        // MHz (adjust for your region)
-#define BANDWIDTH 125.0        // kHz
-#define SPREADING_FACTOR 9     // 6-12 (lower = faster, less range)
-#define TXPOWER 14             // dBm (adjust for range/power consumption)
+const char* SERVER_URL = "https://your-webhook-url.com/endpoint";
+const char* JSON_PATH  = "/data.json";
 ```
 
-### Timing Parameters
+#### LoRa Parameters
 ```cpp
-#define HEARTBEAT_GAP 150      // ms between master heartbeat bursts
-#define HEARTBEAT_COUNT 3      // number of heartbeat bursts
-#define LISTEN_WINDOW 6500     // slave listening window (ms) - slaves wait longer
-#define FAIL_LIMIT 10          // missed cycles before slave promotes to master
-#define SLEEP_MS 5000          // sleep duration between cycles (ms)
+#define FREQUENCY        916.3        // MHz (adjust for your region)
+#define BANDWIDTH        250.0        // kHz (wider bandwidth for faster transmission)
+#define SPREADING_FACTOR 9            // 6-12 (lower = faster, less range)
+#define TXPOWER          14           // dBm
+#define FRAME_PERIOD_MS  10000        // Frame broadcast interval (10 seconds)
+```
+
+#### Upload Settings
+```cpp
+const unsigned long UPLOAD_INTERVAL_MS = 60000;   // Upload every 60 seconds
+```
+
+### Slave Node Configuration (`slave/slave.ino`)
+
+#### Node ID
+```cpp
+#define NODE_ID 3  // Set to 2, 3, 4, etc. for each slave
+```
+
+#### LoRa Parameters (must match master)
+```cpp
+#define FREQUENCY        916.3        // Must match master
+#define BANDWIDTH        250.0        // Must match master
+#define SPREADING_FACTOR 9            // Must match master
+#define TXPOWER          14           // Must match master
+```
+
+#### Timing Parameters
+```cpp
+#define FRAME_PERIOD_MS     10000    // Must match master
+#define BASE_OFFSET_MS      200      // Delay after FRAME before first slave
+#define PER_NODE_DELAY_MS   1000     // 1 second between each slave
+#define SLEEP_SECONDS       10       // Deep sleep duration (nominally 1 frame)
 ```
 
 ## 🔄 How It Works
 
-### Initial Boot
-
-1. **Node ID 1**: Automatically becomes master on boot
-2. **Other Nodes**: Start as slaves and listen for master packets
-
 ### Master Node Operation
 
-1. **Wake from Sleep**:
-   - Increments counter
-   - Formats packet: `"MASTER|" + counter`
-   - Example: `"MASTER|42"`
+1. **Initialization**:
+   - Initializes SPIFFS file system
+   - Connects to WiFi
+   - Initializes LoRa radio
+   - Starts listening for slave transmissions
 
-2. **Transmission**:
-   - Displays "MASTER" and payload on OLED
-   - Transmits packet **three times** with 150ms delay between bursts
-   - Enters deep sleep for 5 seconds (configurable)
+2. **Frame Broadcasting**:
+   - Every 10 seconds, broadcasts `"FRAME|" + frameCounter`
+   - Frame counter increments with each broadcast
+   - Example: `"FRAME|42"`
+
+3. **Receiving Slave Data**:
+   - Listens for slave transmissions using interrupt-based RX
+   - Receives packets in format: `"NODE_ID + 4-digit counter"`
+   - Example: `"20005"` = Node 2, Counter 5
+
+4. **Data Logging**:
+   - Logs each received packet to SPIFFS as NDJSON (newline-delimited JSON)
+   - Format: `{"node":2,"counter":5,"raw":"20005","frame":42}`
+   - One JSON object per line
+
+5. **Data Upload**:
+   - Every 60 seconds, reads all logged data from SPIFFS
+   - Converts NDJSON to JSON array format
+   - POSTs to configured webhook URL via HTTP
+   - Deletes local file on successful upload
+   - Retries on failure (keeps file for next attempt)
 
 ### Slave Node Operation
 
-1. **Wake from Sleep**:
-   - Shows "SLAVE Listening..." on OLED
-   - Starts listening for master packets using interrupt-based RX
+1. **Initial Boot**:
+   - Initializes LoRa radio
+   - Waits for first "FRAME|" message from master
+   - Records frame start time and enters synced state
 
-2. **Reception**:
-   - Listens for up to 6.5 seconds (LISTEN_WINDOW) - extended window for better reliability
-   - Uses hardware interrupt (DIO1) to detect incoming packets
-   - If packet starts with "MASTER|":
-     - Resets miss counter
-     - Displays "RX MASTER" and packet on OLED
-   - If no packet received:
-     - Increments miss counter
-     - Displays "NO MASTER" and miss count (format: "Miss=X")
+2. **Frame Synchronization**:
+   - Listens for "FRAME|" messages continuously
+   - Updates frame start time on each FRAME reception
+   - Maintains synchronization with master
 
-3. **Master Promotion**:
-   - If miss count >= 10 (FAIL_LIMIT):
-     - Promotes itself to master
-     - Displays "PROMOTING BECOME MASTER"
-     - Sets `isMaster = true`
-     - Resets miss counter
+3. **Staggered Transmission**:
+   - Calculates transmission time based on node ID:
+     - Node 2: `frameStart + 200ms + 0 * 1000ms`
+     - Node 3: `frameStart + 200ms + 1 * 1000ms`
+     - Node 4: `frameStart + 200ms + 2 * 1000ms`
+   - Transmits within 200ms window to tolerate jitter
+   - Prevents multiple transmissions in same frame
 
-4. **Sleep**:
-   - Enters deep sleep for 5 seconds (configurable)
+4. **Packet Format**:
+   - Builds message: `NODE_ID (1 digit) + Counter (4 digits)`
+   - Example: Node 3, Counter 12 → `"30012"`
+   - Counter persists across deep sleep using RTC memory
 
-### State Persistence
+5. **Deep Sleep**:
+   - After transmission, enters deep sleep for 10 seconds
+   - Wakes up before next frame to resynchronize
+   - Counter value preserved across sleep cycles
 
-All state variables use `RTC_DATA_ATTR` to persist across deep sleep:
-- `isMaster`: Current role (master or slave)
-- `counter`: Master's transmission counter
-- `missCount`: Slave's missed packet counter
+### TDMA Timing Diagram
+
+```
+Time (seconds)
+0    1    2    3    4    5    6    7    8    9    10
+|----|----|----|----|----|----|----|----|----|----|
+M: FRAME|1
+    |
+    +--200ms--> S2: 20005
+    |
+    +--1200ms--> S3: 30012
+    |
+    +--2200ms--> S4: 40023
+    |
+    (slaves sleep until next frame)
+    
+M: FRAME|2
+    |
+    +--200ms--> S2: 20006
+    ...
+```
 
 ## 📁 Project Structure
 
 ```
 LoRa-RxTx/
+├── master/
+│   └── master.ino         # Master node code (with WiFi upload)
+├── slave/
+│   └── slave.ino          # Slave node code (TDMA transmission)
 ├── LoRa_rx_tx/
-│   └── LoRa_rx_tx.ino    # Main Arduino sketch
-├── .gitignore            # Git ignore file
-└── README.md             # This file
+│   └── LoRa_rx_tx.ino     # Legacy code (may be deprecated)
+├── .gitignore             # Git ignore file
+└── README.md              # This file
 ```
 
 ## 🚀 Usage
 
-1. **Configure** Node ID in the code (ID 1 = master, others = slaves)
-2. **Upload** the sketch to your Heltec ESP32 LoRa board
-3. **Power on** Node ID 1 (it will become master)
-4. **Power on** additional nodes with different IDs (they will become slaves)
-5. **Monitor** via Serial Monitor (115200 baud) and OLED display
+### Setting Up Master Node
 
-### Serial Monitor Output
+1. Open `master/master.ino` in Arduino IDE
+2. Configure WiFi credentials:
+   ```cpp
+   const char* WIFI_SSID     = "YourWiFiSSID";
+   const char* WIFI_PASSWORD = "YourWiFiPassword";
+   ```
+3. Configure webhook URL:
+   ```cpp
+   const char* SERVER_URL = "https://your-webhook-url.com/endpoint";
+   ```
+4. Upload to Node ID 1 board
+5. Monitor Serial output (115200 baud) for status
 
-Serial output is available for debugging (115200 baud).
+### Setting Up Slave Nodes
 
-### OLED Display States
+1. Open `slave/slave.ino` in Arduino IDE
+2. Set `NODE_ID` for each slave (2, 3, 4, etc.)
+3. Ensure LoRa parameters match master exactly
+4. Upload to respective boards
+5. Monitor Serial output (115200 baud) for synchronization status
 
-- **Boot**: "BOOT MASTER" or "BOOT SLAVE"
-- **Master**: "MASTER [payload]"
-- **Slave Listening**: "SLAVE Listening..."
-- **Slave Received**: "RX MASTER [payload]"
-- **No Master**: "NO MASTER Miss=[count]"
-- **Promotion**: "PROMOTING BECOME MASTER"
+### Network Operation
+
+1. Power on master node first (it will start broadcasting FRAME messages)
+2. Power on slave nodes (they will sync to first FRAME received)
+3. Slaves will transmit in their assigned time slots
+4. Master logs all received data and uploads to webhook every 60 seconds
 
 ## 📡 Network Protocol
 
-### Packet Format
+### Frame Synchronization
 
-- **Master Packet**: `"MASTER|" + counter`
-- **Example**: `"MASTER|42"` = Master, Counter 42
+- **Master Packet**: `"FRAME|" + frameCounter`
+- **Frequency**: Every 10 seconds
+- **Purpose**: Synchronize all slaves to common time reference
 
-### Master Transmission
+### Slave Transmission
 
-- Master transmits each packet **three times** with 150ms delay between bursts
-- Provides redundancy for better reliability in noisy environments
+- **Packet Format**: `NODE_ID (1 digit) + Counter (4 digits)`
+- **Examples**: 
+  - `"20005"` = Node 2, Counter 5
+  - `"30012"` = Node 3, Counter 12
+- **Timing**: Staggered 1 second apart to prevent collisions
 
-### Network Topology
+### Data Logging Format
 
-- **Star Topology**: One master, multiple slaves
-- **Range**: Typically 1-5 km line-of-sight (depends on environment and LoRa parameters)
-- **Scalability**: Multiple slaves can listen to one master
-- **Failover**: Automatic master promotion if master fails
+Master logs data as NDJSON (newline-delimited JSON):
+```json
+{"node":2,"counter":5,"raw":"20005","frame":42}
+{"node":3,"counter":12,"raw":"30012","frame":42}
+{"node":2,"counter":6,"raw":"20006","frame":43}
+```
+
+Upload format (JSON array):
+```json
+[
+{"node":2,"counter":5,"raw":"20005","frame":42},
+{"node":3,"counter":12,"raw":"30012","frame":42},
+{"node":2,"counter":6,"raw":"20006","frame":43}
+]
+```
 
 ## 📶 LoRa Parameters
 
 Default configuration:
-- **Frequency**: 916.0 MHz (adjust for your region's ISM band)
-- **Bandwidth**: 125.0 kHz
+- **Frequency**: 916.3 MHz (adjust for your region's ISM band)
+- **Bandwidth**: 250.0 kHz (wider bandwidth for faster transmission)
 - **Spreading Factor**: 9 (faster, less range than SF11)
 - **TX Power**: 14 dBm (adjustable for range/power tradeoff)
 
-**Note**: Ensure LoRa parameters match across all nodes in your network.
+**Critical**: All nodes (master and slaves) must use identical LoRa parameters for proper communication.
 
 ## 🔋 Power Management
 
-- **Deep Sleep**: Device sleeps for 5 seconds between cycles (configurable via `SLEEP_MS`)
-- **OLED Display**: Powered off during sleep (Vext = HIGH) and during radio initialization
-- **Safe Boot Sequence**: OLED and peripherals kept off during radio initialization to prevent interference
-- **Radio Reset**: Hardware reset performed during initialization for reliable operation
-- **RTC Memory**: State preserved during deep sleep
-- **Interrupt-Based RX**: More power-efficient than polling
+### Master Node
+- **Always Active**: Master stays awake to receive slave transmissions
+- **WiFi Power**: WiFi consumes additional power when connected
+- **SPIFFS**: File system operations have minimal power impact
 
-**Estimated Battery Life**: With a 2000mAh battery and 5-second wake intervals, the device can run for several weeks to months depending on transmission frequency and power settings.
+### Slave Nodes
+- **Deep Sleep**: Slaves sleep for 10 seconds after each transmission
+- **Wake Timing**: Wake up before next frame to resynchronize
+- **RTC Memory**: Counter persists across deep sleep cycles
+- **Power Efficiency**: Deep sleep significantly reduces power consumption
+
+**Estimated Battery Life**:
+- **Master**: Several days to weeks (depends on WiFi usage and power supply)
+- **Slaves**: Several weeks to months (with 10-second sleep cycles)
 
 ## 🐛 Troubleshooting
 
-### Multiple Masters Appearing
+### Slaves Not Synchronizing
 
-- Ensure only Node ID 1 is configured as master initially
-- Check that `NODE_ID` is correctly set in each node's code
-- Verify that slaves are receiving master packets (check miss count)
-
-### Slave Not Receiving Packets
-
-- Verify master is transmitting (check OLED display)
-- Ensure nodes are within range (typically 1-5 km line-of-sight)
-- Check that LoRa parameters match across all nodes
+- Verify master is broadcasting FRAME messages (check Serial output)
+- Ensure all nodes use identical LoRa parameters
+- Check that slaves are within range of master
 - Verify antenna connections
-- Check for interference on the selected frequency
-- Increase `LISTEN_WINDOW` if needed
 
-### Slave Promoting Too Quickly
+### Collision Issues
 
-- Increase `FAIL_LIMIT` to allow more missed cycles before promotion
-- Check master transmission reliability
-- Verify master is actually transmitting
+- Ensure each slave has unique NODE_ID (2, 3, 4, etc.)
+- Check that `PER_NODE_DELAY_MS` is sufficient (default 1000ms)
+- Verify slaves are receiving FRAME messages for synchronization
 
-### Master Not Transmitting
+### Master Not Receiving Slave Data
 
-- Check OLED display for "MASTER" status
-- Verify `NODE_ID == 1` or `isMaster == true`
-- Check radio initialization
-- Verify power supply is stable
+- Check Serial output for "RX SLAVE" messages
+- Verify slaves are transmitting at correct time offsets
+- Ensure LoRa parameters match exactly
+- Check for interference or range issues
 
-### OLED Display Not Working
+### WiFi Upload Failures
 
-- Verify `Vext` pin is set to LOW (powers on display)
-- Check display initialization
-- Verify display library is properly installed
+- Verify WiFi credentials are correct
+- Check that webhook URL is accessible
+- Monitor Serial output for HTTP status codes
+- Data is retained in SPIFFS for retry if upload fails
 
-### Deep Sleep Issues
+### SPIFFS Issues
 
+- SPIFFS is automatically formatted on first use
+- Check Serial output for "SPIFFS mount" messages
+- If file system fails, master will continue operation without logging
+
+### Deep Sleep Issues (Slaves)
+
+- Verify `SLEEP_SECONDS` matches frame period (10 seconds)
+- Check that RTC memory is preserving counter (check Serial on wake)
 - Ensure GPIO 0 is not pulled low (prevents wake)
-- Check that RTC pins are not disturbed during sleep
-- Verify power supply is stable
-- Check that wake timer is properly configured
 
 ## 🔧 Advanced Configuration
 
-### Changing Sleep Duration
+### Adjusting Frame Period
 
-Modify `SLEEP_MS` to change how often nodes wake:
+Modify in both master and slave code:
 ```cpp
-#define SLEEP_MS 10000  // Wake every 10 seconds
+#define FRAME_PERIOD_MS 15000  // 15 seconds between frames
 ```
 
-### Adjusting Listen Window
-
-Modify `LISTEN_WINDOW` for better reception (default is 6500ms):
+Also update slave sleep duration:
 ```cpp
-#define LISTEN_WINDOW 8000  // Listen for 8 seconds
+#define SLEEP_SECONDS 15  // Match frame period
 ```
 
-### Changing Failover Threshold
+### Changing TDMA Timing
 
-Modify `FAIL_LIMIT` to change when slaves promote (default is 10):
+Modify slave transmission offsets:
 ```cpp
-#define FAIL_LIMIT 15  // Promote after 15 missed cycles
+#define BASE_OFFSET_MS      300      // Delay after FRAME
+#define PER_NODE_DELAY_MS   1500     // 1.5 seconds between nodes
 ```
 
-### Adjusting Heartbeat Gap
+### Adjusting Upload Interval
 
-Modify `HEARTBEAT_GAP` to change timing between bursts (default is 150ms):
+Modify master upload frequency:
 ```cpp
-#define HEARTBEAT_GAP 200  // 200ms between bursts
+const unsigned long UPLOAD_INTERVAL_MS = 30000;   // Upload every 30 seconds
 ```
 
-### Adjusting LoRa Parameters
+### Changing LoRa Parameters
 
-Modify for your needs:
+Modify for your needs (must match across all nodes):
 ```cpp
 #define SPREADING_FACTOR 11  // Higher = more range, slower
 #define TXPOWER 22          // Higher = more range, more power
-```
-
-### Changing Frequency
-
-Modify for your region:
-```cpp
-#define FREQUENCY 868.0  // European ISM band
-#define FREQUENCY 915.0  // North American ISM band
+#define BANDWIDTH 125.0     // Lower = less data rate, more range
 ```
 
 ## 📝 License
@@ -342,4 +435,8 @@ For questions or issues, please open an issue on GitHub.
 
 ---
 
-**Note**: Ensure all nodes use the same LoRa parameters (frequency, bandwidth, spreading factor, etc.) for proper communication. The frequency must be legal for use in your region. Node ID 1 is the default master; other nodes will automatically promote if the master fails.
+**Note**: 
+- Ensure all nodes use identical LoRa parameters for proper communication
+- The frequency must be legal for use in your region
+- Master node requires WiFi connectivity for data upload functionality
+- TDMA timing requires accurate frame synchronization - ensure slaves receive FRAME messages reliably

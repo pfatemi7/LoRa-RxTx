@@ -1,9 +1,10 @@
 // =======================
-// SLAVE (ID > 1) - 1s staggered TX
+// SLAVE (ID > 1) - 1s staggered TX + DEEP SLEEP
 // =======================
 
 #define HELTEC_POWER_BUTTON
 #include <heltec_unofficial.h>
+#include <esp_sleep.h>
 
 // ==================================
 // CHANGE THIS FOR EACH SLAVE NODE
@@ -18,7 +19,7 @@
 #define SPREADING_FACTOR 9
 #define TXPOWER          14
 
-// TDMA-ish frame settings
+// FRAME & timing
 #define FRAME_PERIOD_MS     10000    // master sends FRAME every 10s
 
 // timing inside frame:
@@ -28,18 +29,35 @@
 #define BASE_OFFSET_MS      200      // small delay after FRAME
 #define PER_NODE_DELAY_MS   1000     // 1 second between nodes
 
+// Deep sleep duration (seconds)
+#define SLEEP_SECONDS       10       // nominally 1 frame
+
 String rxdata;
 volatile bool rxFlag = false;
 
 bool synced = false;
 uint64_t frameStart = 0;
 
-uint32_t counter = 1;
+// Counter must survive deep sleep
+RTC_DATA_ATTR uint32_t counter = 1;
 
-// Prevent multiple TX inside a frame
+// Prevent multiple TX inside a frame (no need to persist across sleep)
 uint64_t lastFrameSent = 0;
 
 void rxCallback() { rxFlag = true; }
+
+void goToSleep() {
+  both.printf("NODE %d going to deep sleep for %d s\n", NODE_ID, SLEEP_SECONDS);
+
+  // small flush so you see logs
+  Serial.flush();
+
+  // Enable timer wakeup
+  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL);
+
+  // Deep sleep (CPU stops here)
+  esp_deep_sleep_start();
+}
 
 void setup() {
   heltec_setup();
@@ -47,6 +65,7 @@ void setup() {
   both.println();
   both.println("=========== SLAVE BOOT ===========");
   both.printf("NODE_ID = %d\n", NODE_ID);
+  both.printf("Counter starts at: %u\n", counter);
 
   RADIOLIB_OR_HALT(radio.begin());
 
@@ -59,6 +78,8 @@ void setup() {
   RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
 
   both.println("Radio ready, waiting for FRAME...");
+  synced = false;
+  lastFrameSent = 0;
 }
 
 void loop() {
@@ -96,7 +117,7 @@ void loop() {
       frameStart = millis();
       both.printf("FRAME received, resync.\n");
     } else {
-      // optional: see if this node hears other nodes
+      // optional debug if nodes hear each other
       // both.printf("RX while synced: %s\n", rxdata.c_str());
     }
 
@@ -108,7 +129,7 @@ void loop() {
   // ===========================
 
   uint64_t now = millis();
-  // ID 2 → offset 0, ID 3 → offset 1 second, etc.
+  // nodeIndex: ID 2 → 0, ID 3 → 1, ID 4 → 2, ...
   int32_t nodeIndex = NODE_ID - 2;
   if (nodeIndex < 0) nodeIndex = 0;  // safety
 
@@ -123,7 +144,7 @@ void loop() {
     }
     lastFrameSent = frameStart;
 
-    // Build message: e.g., "20005", "30005" etc.
+    // Build message: e.g., "20005" / "30012"
     char buf[6];
     sprintf(buf, "%1d%04u", NODE_ID, counter++);
     String msg = String(buf);
@@ -138,9 +159,9 @@ void loop() {
     RADIOLIB(radio.transmit(msg.c_str()));
     radio.setDio1Action(rxCallback);
 
-    RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
-
-    // extra guard against re-fire jitter
-    delay(250);
+    // No need to stay awake after this → go to sleep
+    goToSleep();
   }
+
+  // If we're between frames, just idle & listen.
 }
